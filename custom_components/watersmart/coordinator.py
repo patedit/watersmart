@@ -186,7 +186,7 @@ class WaterSmartUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         for record in new_records:
             gallons = _record_gallons(record)
             running_sum += gallons
-            start = dt.datetime.fromtimestamp(record["read_datetime"], tz=dt.UTC)
+            start = _from_timestamp(record["read_datetime"]).astimezone(dt.UTC)
             stat_data.append(
                 StatisticData(
                     start=start,
