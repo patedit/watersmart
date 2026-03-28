@@ -8,12 +8,11 @@ from aiohttp import ClientError
 from aiohttp.client_exceptions import ClientConnectorError
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_USERNAME
-from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 import voluptuous as vol
 
-from .client import AuthenticationError, WaterSmartClient
+from .client import AuthenticationError, TwoFactorAuthRequiredError, WaterSmartClient
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -26,43 +25,22 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     }
 )
 
-
-async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
-    """Validate the user input allows us to connect.
-
-    Data has the keys from STEP_USER_DATA_SCHEMA with values provided by the user.
-
-    Returns:
-        The details for creating a new config entry.
-
-    Raises:
-        CannotConnect: For connection errors.
-        InvalidAuth: For authentication errors.
-    """
-
-    session = async_get_clientsession(hass)
-    client = WaterSmartClient(
-        data[CONF_HOST], data[CONF_USERNAME], data[CONF_PASSWORD], session=session
-    )
-
-    try:
-        async with timeout(30):
-            account_number = await client.async_get_account_number()
-    except (ClientConnectorError, TimeoutError, ClientError) as error:
-        raise CannotConnect from error
-    except AuthenticationError as error:
-        raise InvalidAuth from error
-
-    if not account_number:
-        raise InvalidAuth
-
-    return {"title": f"{data[CONF_HOST]} ({data[CONF_USERNAME]})"}
+STEP_2FA_DATA_SCHEMA = vol.Schema(
+    {
+        vol.Required("code"): str,
+    }
+)
 
 
 class WaterSmartConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
     """Handle a config flow for WaterSmart."""
 
     VERSION = 1
+
+    def __init__(self) -> None:
+        """Initialize the config flow."""
+        self._user_input: dict[str, Any] = {}
+        self._client: WaterSmartClient | None = None
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -74,17 +52,36 @@ class WaterSmartConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
         """
         errors: dict[str, str] = {}
         if user_input is not None:
+            self._user_input = user_input
+            session = async_get_clientsession(self.hass)
+            self._client = WaterSmartClient(
+                user_input[CONF_HOST],
+                user_input[CONF_USERNAME],
+                user_input[CONF_PASSWORD],
+                session=session,
+            )
+
             try:
-                info = await validate_input(self.hass, user_input)
-            except CannotConnect:
+                async with timeout(30):
+                    account_number = await self._client.async_get_account_number()
+            except (ClientConnectorError, TimeoutError, ClientError):
                 errors["base"] = "cannot_connect"
-            except InvalidAuth:
+            except TwoFactorAuthRequiredError:
+                # 2FA is required, proceed to 2FA step
+                return await self.async_step_2fa()
+            except AuthenticationError:
                 errors["base"] = "invalid_auth"
             except Exception:
                 _LOGGER.exception("Unexpected exception")
                 errors["base"] = "unknown"
             else:
-                return self.async_create_entry(title=info["title"], data=user_input)
+                if not account_number:
+                    errors["base"] = "invalid_auth"
+                else:
+                    return self.async_create_entry(
+                        title=f"{user_input[CONF_HOST]} ({user_input[CONF_USERNAME]})",
+                        data=user_input,
+                    )
 
         return self.async_show_form(
             step_id="user",
@@ -94,6 +91,47 @@ class WaterSmartConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
                 "example_host": "bendoregon",
                 "example_url": "https://bendoregon.watersmart.com/",
             },
+        )
+
+    async def async_step_2fa(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle the 2FA verification step.
+
+        Returns:
+            The config flow result.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            if self._client is None:
+                # Client was lost, restart flow
+                return await self.async_step_user()
+
+            try:
+                async with timeout(30):
+                    await self._client.async_submit_2fa_code(user_input["code"])
+                    account_number = await self._client.async_get_account_number()
+            except (ClientConnectorError, TimeoutError, ClientError):
+                errors["base"] = "cannot_connect"
+            except AuthenticationError:
+                errors["base"] = "invalid_2fa_code"
+            except Exception:
+                _LOGGER.exception("Unexpected exception during 2FA")
+                errors["base"] = "unknown"
+            else:
+                if not account_number:
+                    errors["base"] = "invalid_auth"
+                else:
+                    return self.async_create_entry(
+                        title=f"{self._user_input[CONF_HOST]} ({self._user_input[CONF_USERNAME]})",
+                        data=self._user_input,
+                    )
+
+        return self.async_show_form(
+            step_id="2fa",
+            data_schema=STEP_2FA_DATA_SCHEMA,
+            errors=errors,
         )
 
 

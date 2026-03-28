@@ -37,6 +37,14 @@ class AuthenticationError(Exception):
         self._errors = errors
 
 
+class TwoFactorAuthRequiredError(Exception):
+    """Two-factor authentication is required."""
+
+    def __init__(self, message: str = "2FA code required") -> None:
+        """Initialize."""
+        super().__init__(message)
+
+
 class InvalidAccountNumberError(Exception):
     """Invalid account number Error."""
 
@@ -83,6 +91,7 @@ class WaterSmartClient:
         self._session = session or aiohttp.ClientSession()
         self._account_number: str | None = None
         self._authenticated_at: dt.datetime | None = None
+        self._2fa_pending: bool = False
 
     @_authenticated
     async def async_get_account_number(self) -> str | None:
@@ -116,7 +125,6 @@ class WaterSmartClient:
             tz=dt.UTC
         ) - dt.timedelta(minutes=10):
             await self._authenticate()
-        self._authenticated_at = dt.datetime.now(tz=dt.UTC)
 
     async def _authenticate(self) -> None:
         session = self._session
@@ -152,6 +160,74 @@ class WaterSmartClient:
             login_response_text = await login_response.text()
             soup = BeautifulSoup(login_response_text, "html.parser")
 
+        # Check if 2FA verification is required
+        if self._is_2fa_required(soup):
+            self._2fa_pending = True
+            raise TwoFactorAuthRequiredError()
+
+        self._process_authenticated_response(soup)
+
+    def _is_2fa_required(self, soup: BeautifulSoup) -> bool:
+        """Check if the response indicates 2FA is required.
+
+        Args:
+            soup: Parsed HTML response.
+
+        Returns:
+            True if verificationCode input field is present.
+        """
+        return soup.find("input", {"name": "verificationCode"}) is not None
+
+    async def async_submit_2fa_code(self, code: str) -> None:
+        """Submit the 2FA verification code.
+
+        Args:
+            code: The verification code received via email.
+
+        Raises:
+            AuthenticationError: If 2FA submission fails.
+            TwoFactorAuthRequiredError: If 2FA was not initiated.
+        """
+        if not self._2fa_pending:
+            raise AuthenticationError(["2FA verification was not initiated"])
+
+        session = self._session
+        hostname = self._hostname
+
+        response = await session.post(
+            f"https://{hostname}.watersmart.com/index.php/welcome/verify",
+            data={
+                "verificationCode": code,
+            },
+        )
+        response_text = await response.text()
+        soup = BeautifulSoup(response_text, "html.parser")
+
+        # Check for error messages first (e.g., "Incorrect Code. Please try again.")
+        errors = [error.text.strip() for error in soup.select(".error-message")]
+        errors = [error for error in errors if error]
+
+        if errors:
+            raise AuthenticationError(errors)
+
+        # Check if still asking for 2FA (shouldn't happen if no error message)
+        if self._is_2fa_required(soup):
+            raise AuthenticationError(["Invalid verification code"])
+
+        self._2fa_pending = False
+        self._process_authenticated_response(soup)
+
+    def _process_authenticated_response(self, soup: BeautifulSoup) -> None:
+        """Process the response after successful authentication.
+
+        Args:
+            soup: Parsed HTML response.
+
+        Raises:
+            AuthenticationError: If there are error messages.
+            ScrapeError: If expected elements are missing.
+            InvalidAccountNumberError: If account number format is invalid.
+        """
         errors = [error.text.strip() for error in soup.select(".error-message")]
         errors = [error for error in errors if error]
 
@@ -175,6 +251,7 @@ class WaterSmartClient:
             raise InvalidAccountNumberError("invalid account number: " + account_number)
 
         self._account_number = account_number
+        self._authenticated_at = dt.datetime.now(tz=dt.UTC)
 
 
 def _assert_node(node: PageElement, message: str) -> PageElement:

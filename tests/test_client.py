@@ -9,6 +9,7 @@ from custom_components.watersmart.client import (
     AuthenticationError,
     InvalidAccountNumberError,
     ScrapeError,
+    TwoFactorAuthRequiredError,
     WaterSmartClient,
 )
 
@@ -209,3 +210,96 @@ async def test_async_get_async_get_hourly_data(
         },
         {"read_datetime": 1718834400, "gallons": 0, "flags": None, "leak_gallons": 0},
     ]
+
+
+async def test_login_2fa_required(
+    hass: HomeAssistant, mock_aiohttp_session, fixture_loader
+):
+    """Test that 2FA requirement is detected."""
+    mock_aiohttp_session.post.return_value.text.return_value = (
+        fixture_loader.login_2fa_required_html
+    )
+
+    client = WaterSmartClient(
+        hostname="test",
+        username="test@home-assistant.io",
+        password="Passw0rd",  # noqa: S106
+    )
+
+    with pytest.raises(TwoFactorAuthRequiredError):
+        await client.async_get_account_number()
+
+    assert client._2fa_pending is True
+
+
+async def test_login_2fa_success(
+    hass: HomeAssistant, mock_aiohttp_session, fixture_loader
+):
+    """Test successful 2FA submission."""
+    resp1 = AsyncMock()
+    resp1.text.return_value = fixture_loader.login_2fa_required_html
+    resp2 = AsyncMock()
+    resp2.text.return_value = fixture_loader.login_success_html
+
+    mock_aiohttp_session.post.side_effect = [resp1, resp2]
+
+    client = WaterSmartClient(
+        hostname="test",
+        username="test@home-assistant.io",
+        password="Passw0rd",  # noqa: S106
+    )
+
+    with pytest.raises(TwoFactorAuthRequiredError):
+        await client.async_get_account_number()
+
+    await client.async_submit_2fa_code("123456")
+
+    assert client._2fa_pending is False
+    assert client._account_number == "1234567-8900"
+
+    mock_aiohttp_session.post.assert_has_calls(
+        [
+            call(
+                "https://test.watersmart.com/index.php/welcome/verify",
+                data={
+                    "verificationCode": "123456",
+                },
+            ),
+        ]
+    )
+
+
+async def test_login_2fa_invalid_code(
+    hass: HomeAssistant, mock_aiohttp_session, fixture_loader
+):
+    """Test invalid 2FA code."""
+    resp1 = AsyncMock()
+    resp1.text.return_value = fixture_loader.login_2fa_required_html
+    resp2 = AsyncMock()
+    resp2.text.return_value = fixture_loader.login_2fa_required_html
+
+    mock_aiohttp_session.post.side_effect = [resp1, resp2]
+
+    client = WaterSmartClient(
+        hostname="test",
+        username="test@home-assistant.io",
+        password="Passw0rd",  # noqa: S106
+    )
+
+    with pytest.raises(TwoFactorAuthRequiredError):
+        await client.async_get_account_number()
+
+    with pytest.raises(AuthenticationError):
+        await client.async_submit_2fa_code("wrong_code")
+
+
+async def test_login_2fa_not_initiated(hass: HomeAssistant, mock_aiohttp_session):
+    """Test submitting 2FA code when 2FA was not initiated."""
+    client = WaterSmartClient(
+        hostname="test",
+        username="test@home-assistant.io",
+        password="Passw0rd",  # noqa: S106
+    )
+
+    with pytest.raises(AuthenticationError):
+        await client.async_submit_2fa_code("123456")
