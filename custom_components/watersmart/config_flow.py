@@ -123,9 +123,14 @@ class WaterSmartConfigFlow(ConfigFlow, domain=DOMAIN):  # type: ignore[call-arg]
                 if not account_number:
                     errors["base"] = "invalid_auth"
                 else:
+                    # Save cookies for bypassing 2FA on restart
+                    entry_data = {
+                        **self._user_input,
+                        "cookies": self._client.get_cookies(),
+                    }
                     return self.async_create_entry(
                         title=f"{self._user_input[CONF_HOST]} ({self._user_input[CONF_USERNAME]})",
-                        data=self._user_input,
+                        data=entry_data,
                     )
 
         return self.async_show_form(

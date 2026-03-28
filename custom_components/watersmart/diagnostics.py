@@ -12,6 +12,7 @@ from .coordinator import WaterSmartUpdateCoordinator
 TO_REDACT = {
     CONF_USERNAME,
     CONF_PASSWORD,
+    "cookies",
 }
 
 

@@ -83,6 +83,7 @@ class WaterSmartClient:
         username: str,
         password: str,
         session: aiohttp.ClientSession = None,
+        cookies: dict[str, str] | None = None,
     ) -> None:
         """Initialize."""
         self._hostname = hostname
@@ -92,6 +93,31 @@ class WaterSmartClient:
         self._account_number: str | None = None
         self._authenticated_at: dt.datetime | None = None
         self._2fa_pending: bool = False
+
+        # Restore cookies if provided (for bypassing 2FA on restart)
+        if cookies:
+            self._restore_cookies(cookies)
+
+    def _restore_cookies(self, cookies: dict[str, str]) -> None:
+        """Restore cookies to the session."""
+        from http.cookies import SimpleCookie
+
+        from yarl import URL  # Already installed as aiohttp dependency
+
+        url = URL(f"https://{self._hostname}.watersmart.com/")
+        for name, value in cookies.items():
+            self._session.cookie_jar.update_cookies(
+                SimpleCookie({name: value}),
+                response_url=url,
+            )
+
+    def get_cookies(self) -> dict[str, str]:
+        """Extract cookies from the session for persistence."""
+        cookies = {}
+        for cookie in self._session.cookie_jar:
+            if self._hostname in (cookie.get("domain", "") or ""):
+                cookies[cookie.key] = cookie.value
+        return cookies
 
     @_authenticated
     async def async_get_account_number(self) -> str | None:

@@ -41,9 +41,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: WaterSmartConfigEntry) -
     hostname: str = entry.data[CONF_HOST]
     username: str = entry.data[CONF_USERNAME]
     password: str = entry.data[CONF_PASSWORD]
+    cookies: dict[str, str] | None = entry.data.get("cookies")
 
     session = async_get_clientsession(hass)
-    watersmart = WaterSmartClient(hostname, username, password, session=session)
+    watersmart = WaterSmartClient(
+        hostname, username, password, session=session, cookies=cookies
+    )
 
     coordinator = WaterSmartUpdateCoordinator(
         hass,
